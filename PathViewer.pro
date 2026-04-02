@@ -10,6 +10,7 @@ SOURCES += \
     mainwindow.cpp
 
 HEADERS += \
+    canvaswidget.h \
     mainwindow.h
 
 FORMS += \
