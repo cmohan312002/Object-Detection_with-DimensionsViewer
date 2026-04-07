@@ -30,12 +30,17 @@ private slots:
     void onObjectSelected(int row);
     void onCanvasClicked(int index);
     void onObjectMoved(int idx);
+
+    void packShapes();
     void updateUndoRedoButtons();
     void showCanvasContextMenu(const QPoint &pos);
     void showListContextMenu(const QPoint &pos);
     void nudgeSelected(int dx_mm, int dy_mm);
 
+
 private:
+    QPushButton *btnPack;
+    // In private slots:
     void buildUI();
     void applyTheme();
     void loadJson(const QString &path);
