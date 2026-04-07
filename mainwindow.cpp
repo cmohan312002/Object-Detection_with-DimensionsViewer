@@ -27,7 +27,7 @@
 #include <QUndoCommand>
 #include <cmath>
 #include <algorithm>
-
+#include <numeric>
 /* ══════════════════════════════════════════════════════════════════════════
    Colour palette (same as original)
    ══════════════════════════════════════════════════════════════════════════ */
@@ -632,6 +632,14 @@ void MainWindow::buildUI()
     new QShortcut(QKeySequence::Undo, this, SLOT(undo()));
     new QShortcut(QKeySequence::Redo, this, SLOT(redo()));
 
+    // Add with your other mkBtn declarations:
+    btnPack = mkBtn("📦 Pack Shapes");
+
+    // Add to toolbar layout after btnDuplicate:
+    toolbar->addWidget(btnPack);
+
+    // Add to connections:
+    connect(btnPack, &QPushButton::clicked, this, &MainWindow::packShapes);
     // Load default file as in original
     loadJson("C:/Users/shrad/Documents/digitized_20260325_095714.json");
 }
@@ -1067,7 +1075,203 @@ void MainWindow::showListContextMenu(const QPoint &pos)
         menu.exec(objList->mapToGlobal(pos));
     }
 }
+/* ══════════════════════════════════════════════════════════════════════════
+   Undo command for pack operation (saves all old positions at once)
+   ══════════════════════════════════════════════════════════════════════════ */
+class PackShapesCommand : public QUndoCommand
+{
+public:
+    struct ObjState {
+        int index;
+        double oldCX, oldCY, newCX, newCY;
+        QPainterPath oldPath, newPath;
+    };
 
+    PackShapesCommand(std::vector<ShapeObject> *objs, const std::vector<ObjState> &states)
+        : objects(objs), states(states) { setText("Pack Shapes"); }
+
+    void undo() override {
+        for (auto &s : states) {
+            (*objects)[s.index].centerXmm = s.oldCX;
+            (*objects)[s.index].centerYmm = s.oldCY;
+            (*objects)[s.index].pathCanvas = s.oldPath;
+        }
+    }
+    void redo() override {
+        for (auto &s : states) {
+            (*objects)[s.index].centerXmm = s.newCX;
+            (*objects)[s.index].centerYmm = s.newCY;
+            (*objects)[s.index].pathCanvas = s.newPath;
+        }
+    }
+private:
+    std::vector<ShapeObject> *objects;
+    std::vector<ObjState> states;
+};
+
+/* ── Pack / arrange shapes into minimal space ───────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════════════
+   2D Bin-Packing: Maximal Rectangles (Best Short Side Fit)
+   No overlaps, fills gaps greedily, uses all available space
+   ══════════════════════════════════════════════════════════════════════════ */
+void MainWindow::packShapes()
+{
+    if (objects.empty()) return;
+
+    const double MARGIN = 8.0;   // mm from page edge
+    const double GAP    = 5.0;   // mm between shapes
+    const double PAGE_W = 210.0;
+    const double PAGE_H = 297.0;
+
+    // Available packing area
+    const double areaX = MARGIN;
+    const double areaY = MARGIN;
+    const double areaW = PAGE_W - MARGIN * 2;
+    const double areaH = PAGE_H - MARGIN * 2;
+
+    // A free rectangle on the page
+    struct FreeRect {
+        double x, y, w, h;
+    };
+
+    // Start with one big free rectangle = entire usable page
+    std::vector<FreeRect> freeRects = {{ areaX, areaY, areaW, areaH }};
+
+    // Sort shapes: largest area first (better packing)
+    std::vector<int> order(objects.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        return (objects[a].widthMM * objects[a].heightMM) >
+               (objects[b].widthMM * objects[b].heightMM);
+    });
+
+    // Placed positions: index -> (newCX, newCY)
+    std::vector<std::pair<int, QPointF>> placements;
+
+    // Track placed bounding boxes to split free rects
+    struct PlacedRect { double x, y, w, h; };
+    std::vector<PlacedRect> placed;
+
+    for (int idx : order) {
+        const ShapeObject &obj = objects[idx];
+        double sw = obj.widthMM  + GAP;
+        double sh = obj.heightMM + GAP;
+
+        // Find best free rect using BSSF (Best Short Side Fit)
+        int    bestFree  = -1;
+        double bestScore = 1e18;
+
+        for (int i = 0; i < (int)freeRects.size(); ++i) {
+            const FreeRect &fr = freeRects[i];
+            if (fr.w >= sw && fr.h >= sh) {
+                // Short side fit score: minimize the smaller leftover dimension
+                double score = std::min(fr.w - sw, fr.h - sh);
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestFree  = i;
+                }
+            }
+        }
+
+        if (bestFree < 0) {
+            // No space found — place below everything as fallback
+            double maxY = areaY;
+            for (auto &p : placed) maxY = std::max(maxY, p.y + p.h);
+            placements.push_back({ idx, QPointF(areaX + obj.widthMM * 0.5,
+                                               maxY + obj.heightMM * 0.5) });
+            placed.push_back({ areaX, maxY, obj.widthMM + GAP, obj.heightMM + GAP });
+            continue;
+        }
+
+        FreeRect &fr = freeRects[bestFree];
+        double px = fr.x;  // top-left of placed shape (with gap baked in later)
+        double py = fr.y;
+
+        // Record placement (center position)
+        placements.push_back({ idx, QPointF(px + obj.widthMM * 0.5,
+                                           py + obj.heightMM * 0.5) });
+        PlacedRect pr = { px, py, obj.widthMM + GAP, obj.heightMM + GAP };
+        placed.push_back(pr);
+
+        // Split all free rects that overlap with this placed rect
+        std::vector<FreeRect> newFreeRects;
+        for (auto &r : freeRects) {
+            // Does placed rect intersect this free rect?
+            if (pr.x >= r.x + r.w || pr.x + pr.w <= r.x ||
+                pr.y >= r.y + r.h || pr.y + pr.h <= r.y) {
+                newFreeRects.push_back(r);  // no overlap, keep as-is
+                continue;
+            }
+            // Split into up to 4 sub-rectangles around the placed shape
+            // Left slice
+            if (pr.x > r.x)
+                newFreeRects.push_back({ r.x, r.y, pr.x - r.x, r.h });
+            // Right slice
+            if (pr.x + pr.w < r.x + r.w)
+                newFreeRects.push_back({ pr.x + pr.w, r.y,
+                                        r.x + r.w - (pr.x + pr.w), r.h });
+            // Top slice
+            if (pr.y > r.y)
+                newFreeRects.push_back({ r.x, r.y, r.w, pr.y - r.y });
+            // Bottom slice
+            if (pr.y + pr.h < r.y + r.h)
+                newFreeRects.push_back({ r.x, pr.y + pr.h,
+                                        r.w, r.y + r.h - (pr.y + pr.h) });
+        }
+
+        // Remove free rects that are fully contained inside another (deduplicate)
+        std::vector<FreeRect> pruned;
+        for (int i = 0; i < (int)newFreeRects.size(); ++i) {
+            bool contained = false;
+            for (int j = 0; j < (int)newFreeRects.size(); ++j) {
+                if (i == j) continue;
+                const FreeRect &a = newFreeRects[i];
+                const FreeRect &b = newFreeRects[j];
+                if (b.x <= a.x && b.y <= a.y &&
+                    b.x + b.w >= a.x + a.w &&
+                    b.y + b.h >= a.y + a.h) {
+                    contained = true;
+                    break;
+                }
+            }
+            if (!contained) pruned.push_back(newFreeRects[i]);
+        }
+        freeRects = pruned;
+    }
+
+    // Now apply all placements as one undoable command
+    std::vector<PackShapesCommand::ObjState> states;
+    for (auto &[idx, newCenter] : placements) {
+        ShapeObject &obj = objects[idx];
+
+        PackShapesCommand::ObjState state;
+        state.index   = idx;
+        state.oldCX   = obj.centerXmm;
+        state.oldCY   = obj.centerYmm;
+        state.oldPath = obj.pathCanvas;
+
+        double dxMM = newCenter.x() - obj.centerXmm;
+        double dyMM = newCenter.y() - obj.centerYmm;
+
+        obj.centerXmm = newCenter.x();
+        obj.centerYmm = newCenter.y();
+        QTransform trans;
+        trans.translate(dxMM * pxPerMM, dyMM * pxPerMM);
+        obj.pathCanvas = trans.map(state.oldPath);
+
+        state.newCX   = obj.centerXmm;
+        state.newCY   = obj.centerYmm;
+        state.newPath = obj.pathCanvas;
+        states.push_back(state);
+    }
+
+    undoStack.push(new PackShapesCommand(&objects, states));
+    canvas->setObjects(objects, pxPerMM, calibrated);
+    canvas->fitToView();
+    populateSidebar();
+    showObjectDetails(canvas->getSelectedIndex());
+    markDirty();
+}
 int MainWindow::getNextId() const
 {
     int maxId = 0;
