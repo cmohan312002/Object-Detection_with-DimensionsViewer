@@ -28,6 +28,16 @@
 #include <cmath>
 #include <algorithm>
 #include <numeric>
+
+#include <QPainterPath>
+#include <QTransform>
+#include <QRectF>
+#include <vector>
+#include <algorithm>
+#include <numeric>
+#include <cmath>
+#include <limits>
+#include <queue>
 /* ══════════════════════════════════════════════════════════════════════════
    Colour palette (same as original)
    ══════════════════════════════════════════════════════════════════════════ */
@@ -63,7 +73,6 @@ CanvasWidget::CanvasWidget(QWidget *parent) : QWidget(parent)
     setMinimumSize(400, 400);
     setContextMenuPolicy(Qt::CustomContextMenu);
 }
-
 void CanvasWidget::setObjects(const std::vector<ShapeObject> &objs, double pxMM, bool cal)
 {
     objects  = objs;
@@ -336,7 +345,16 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *e)
     } else if (draggingObject && draggedIndex >= 0) {
         QTransform inv = viewTransform().inverted();
         QPointF curCanvas = inv.map(e->position());
-        QPointF delta = curCanvas - dragStartCanvas;
+        double sensitivity = 0.25;   // try 0.2 – 0.4
+        double smoothing   = 0.2;    // lower = smoother
+
+        QPointF rawDelta = curCanvas - dragStartCanvas;
+
+        // apply smoothing (low-pass filter)
+        QPointF smoothDelta = rawDelta * smoothing;
+
+        // final controlled movement
+        QPointF delta = (rawDelta * smoothing * sensitivity) / zoom;
         // apply movement
         ShapeObject &obj = objects[draggedIndex];
         obj.centerXmm = dragOrigCenter.x() + delta.x();
@@ -344,6 +362,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *e)
         QTransform trans;
         trans.translate(delta.x() * pxPerMM, delta.y() * pxPerMM);
         obj.pathCanvas = trans.map(dragOrigPath);
+
         update();
         emit objectMoved(draggedIndex);
     }
@@ -1109,169 +1128,509 @@ private:
     std::vector<ObjState> states;
 };
 
-/* ── Pack / arrange shapes into minimal space ───────────────────────────── */
-/* ══════════════════════════════════════════════════════════════════════════
-   2D Bin-Packing: Maximal Rectangles (Best Short Side Fit)
-   No overlaps, fills gaps greedily, uses all available space
-   ══════════════════════════════════════════════════════════════════════════ */
+
+
+namespace {
+
+constexpr double MASK_RES  = 0.5;
+constexpr double PAGE_W_MM = 210.0;
+constexpr double PAGE_H_MM = 297.0;
+constexpr double MARGIN_MM =   5.0;
+constexpr double GAP_MM    =   1.5;
+
+const double AREA_W = PAGE_W_MM - MARGIN_MM * 2;
+const double AREA_H = PAGE_H_MM - MARGIN_MM * 2;
+
+// ── Raster mask ──────────────────────────────────────────────────────────
+struct Mask
+{
+    int cols = 0, rows = 0;
+    std::vector<uint8_t> data;   // 0 = free, 1 = occupied
+
+    Mask() = default;
+    Mask(double wMM, double hMM)
+        : cols(int(std::ceil(wMM / MASK_RES)) + 2)
+        , rows(int(std::ceil(hMM / MASK_RES)) + 2)
+        , data(size_t(cols) * rows, 0)
+    {}
+
+    bool get(int c, int r) const {
+        if (c < 0 || r < 0 || c >= cols || r >= rows) return true;
+        return data[size_t(r) * cols + c] != 0;
+    }
+    void set(int c, int r) {
+        if (c >= 0 && r >= 0 && c < cols && r < rows)
+            data[size_t(r) * cols + c] = 1;
+    }
+    void clear(int c, int r) {
+        if (c >= 0 && r >= 0 && c < cols && r < rows)
+            data[size_t(r) * cols + c] = 0;
+    }
+
+    void stamp(const QPainterPath &pathMM, double expandMM = 0.0, bool value = true) {
+        QRectF bb = pathMM.boundingRect()
+        .adjusted(-expandMM, -expandMM, expandMM, expandMM);
+        int c0 = std::max(0,      int(std::floor(bb.left()   / MASK_RES)));
+        int c1 = std::min(cols-1, int(std::ceil (bb.right()  / MASK_RES)));
+        int r0 = std::max(0,      int(std::floor(bb.top()    / MASK_RES)));
+        int r1 = std::min(rows-1, int(std::ceil (bb.bottom() / MASK_RES)));
+        for (int r = r0; r <= r1; ++r)
+            for (int c = c0; c <= c1; ++c) {
+                QPointF pt((c + 0.5) * MASK_RES, (r + 0.5) * MASK_RES);
+                if (pathMM.contains(pt)) {
+                    if (value) set(c, r); else clear(c, r);
+                }
+            }
+    }
+    void unstamp(const QPainterPath &pathMM, double expandMM = 0.0) {
+        stamp(pathMM, expandMM, false);
+    }
+
+    bool collides(const QPainterPath &pathMM, double expandMM = 0.0) const {
+        QRectF bb = pathMM.boundingRect()
+        .adjusted(-expandMM, -expandMM, expandMM, expandMM);
+        int c0 = std::max(0,      int(std::floor(bb.left()   / MASK_RES)));
+        int c1 = std::min(cols-1, int(std::ceil (bb.right()  / MASK_RES)));
+        int r0 = std::max(0,      int(std::floor(bb.top()    / MASK_RES)));
+        int r1 = std::min(rows-1, int(std::ceil (bb.bottom() / MASK_RES)));
+        for (int r = r0; r <= r1; ++r)
+            for (int c = c0; c <= c1; ++c) {
+                if (!get(c, r)) continue;
+                QPointF pt((c + 0.5) * MASK_RES, (r + 0.5) * MASK_RES);
+                if (pathMM.contains(pt)) return true;
+            }
+        return false;
+    }
+
+    // Count occupied OR out-of-bounds cells adjacent (within 1 cell) to
+    // candidate boundary — measures how tightly it would fit.
+    int contactScore(const QPainterPath &pathMM) const {
+        QRectF bb = pathMM.boundingRect();
+        int c0 = std::max(0,      int(std::floor(bb.left()   / MASK_RES)) - 1);
+        int c1 = std::min(cols-1, int(std::ceil (bb.right()  / MASK_RES)) + 1);
+        int r0 = std::max(0,      int(std::floor(bb.top()    / MASK_RES)) - 1);
+        int r1 = std::min(rows-1, int(std::ceil (bb.bottom() / MASK_RES)) + 1);
+        int score = 0;
+        for (int r = r0; r <= r1; ++r)
+            for (int c = c0; c <= c1; ++c) {
+                if (!get(c, r)) continue;
+                QPointF pt((c + 0.5) * MASK_RES, (r + 0.5) * MASK_RES);
+                if (pathMM.contains(pt)) continue;
+                score++;
+            }
+        QRectF expanded = bb.adjusted(-MASK_RES, -MASK_RES, MASK_RES, MASK_RES);
+        if (expanded.left()   <= MARGIN_MM)               score += 20;
+        if (expanded.top()    <= MARGIN_MM)               score += 20;
+        if (expanded.right()  >= PAGE_W_MM - MARGIN_MM)  score += 10;
+        if (expanded.bottom() >= PAGE_H_MM - MARGIN_MM)  score += 10;
+        return score;
+    }
+};
+
+// ── Skyline ──────────────────────────────────────────────────────────────
+struct SkySegment { double x, y, w; };
+using Skyline = std::vector<SkySegment>;
+
+Skyline makeSkyline() {
+    return {{ MARGIN_MM, MARGIN_MM, AREA_W }};
+}
+
+void updateSkyline(Skyline &sky, double px, double py, double w, double h)
+{
+    double newH = py + h;
+    double endX = px + w;
+    std::vector<SkySegment> next;
+    for (auto &seg : sky) {
+        double segEnd = seg.x + seg.w;
+        if (segEnd <= px || seg.x >= endX) { next.push_back(seg); continue; }
+        if (seg.x < px) next.push_back({seg.x, seg.y, px - seg.x});
+        double cx   = std::max(seg.x, px);
+        double cEnd = std::min(segEnd, endX);
+        next.push_back({cx, std::max(seg.y, newH), cEnd - cx});
+        if (segEnd > endX) next.push_back({endX, seg.y, segEnd - endX});
+    }
+    std::sort(next.begin(), next.end(), [](auto &a, auto &b){ return a.x < b.x; });
+    sky.clear();
+    for (auto &s : next) {
+        if (s.w < 1e-6) continue;
+        if (!sky.empty() && std::abs(sky.back().y - s.y) < 0.01)
+            sky.back().w += s.w;
+        else
+            sky.push_back(s);
+    }
+}
+
+// ── Path helpers ─────────────────────────────────────────────────────────
+QPainterPath rotatePath(const QPainterPath &src, double rotDeg,
+                        double tx, double ty)
+{
+    QRectF  bb  = src.boundingRect();
+    QPointF ctr = bb.center();
+    QTransform rot;
+    rot.translate(ctr.x(), ctr.y());
+    rot.rotate(rotDeg);
+    rot.translate(-ctr.x(), -ctr.y());
+    QPainterPath rotated = rot.map(src);
+    QRectF rbb = rotated.boundingRect();
+    QTransform shift;
+    shift.translate(tx - rbb.left(), ty - rbb.top());
+    return shift.map(rotated);
+}
+
+QPainterPath pathToMM(const QPainterPath &px, double pxPerMM) {
+    QTransform t; t.scale(1.0 / pxPerMM, 1.0 / pxPerMM);
+    return t.map(px);
+}
+QPainterPath pathToPx(const QPainterPath &mm, double pxPerMM) {
+    QTransform t; t.scale(pxPerMM, pxPerMM);
+    return t.map(mm);
+}
+
+
+struct PocketCluster {
+    double minX, minY;   // top-left corner of the cluster (in mm)
+    double maxX, maxY;   // bottom-right corner
+};
+
+std::vector<PocketCluster> findConcavePockets(const Mask &mask)
+{
+    // Step 1: flood fill from border
+    int N = mask.cols * mask.rows;
+    std::vector<bool> reachable(N, false);
+    std::queue<int> q;
+
+    auto idx = [&](int c, int r){ return r * mask.cols + c; };
+
+    // Seed all free border cells
+    // Top and bottom rows
+    for (int c = 0; c < mask.cols; ++c) {
+        if (!mask.get(c, 0)            && !reachable[idx(c, 0)])
+        { reachable[idx(c, 0)] = true; q.push(idx(c, 0)); }
+        if (!mask.get(c, mask.rows-1)  && !reachable[idx(c, mask.rows-1)])
+        { reachable[idx(c, mask.rows-1)] = true; q.push(idx(c, mask.rows-1)); }
+    }
+    // Left and right columns
+    for (int r = 0; r < mask.rows; ++r) {
+        if (!mask.get(0, r)            && !reachable[idx(0, r)])
+        { reachable[idx(0, r)] = true; q.push(idx(0, r)); }
+        if (!mask.get(mask.cols-1, r)  && !reachable[idx(mask.cols-1, r)])
+        { reachable[idx(mask.cols-1, r)] = true; q.push(idx(mask.cols-1, r)); }
+    }
+
+    const int dc[] = {-1, 1, 0, 0};
+    const int dr[] = { 0, 0,-1, 1};
+    while (!q.empty()) {
+        int cur = q.front(); q.pop();
+        int c = cur % mask.cols;
+        int r = cur / mask.cols;
+        for (int d = 0; d < 4; ++d) {
+            int nc = c + dc[d], nr = r + dr[d];
+            if (nc < 0 || nr < 0 || nc >= mask.cols || nr >= mask.rows) continue;
+            if (reachable[idx(nc, nr)]) continue;
+            if (mask.get(nc, nr)) continue;  // occupied
+            reachable[idx(nc, nr)] = true;
+            q.push(idx(nc, nr));
+        }
+    }
+    int marginCells = int(MARGIN_MM / MASK_RES);
+
+    std::vector<int> label(N, -1);
+    int numClusters = 0;
+
+    for (int r = marginCells; r < mask.rows - marginCells; ++r)
+        for (int c = marginCells; c < mask.cols - marginCells; ++c) {
+            if (mask.get(c, r)) continue;       // occupied
+            if (reachable[idx(c, r)]) continue; // reachable from border
+            if (label[idx(c, r)] >= 0) continue;// already labeled
+
+            // BFS to label this cluster
+            int lbl = numClusters++;
+            std::queue<int> bq;
+            bq.push(idx(c, r));
+            label[idx(c, r)] = lbl;
+            while (!bq.empty()) {
+                int cur = bq.front(); bq.pop();
+                int cc = cur % mask.cols, cr = cur / mask.cols;
+                for (int d = 0; d < 4; ++d) {
+                    int nc = cc + dc[d], nr = cr + dr[d];
+                    if (nc < 0 || nr < 0 || nc >= mask.cols || nr >= mask.rows) continue;
+                    if (label[idx(nc, nr)] >= 0) continue;
+                    if (mask.get(nc, nr)) continue;
+                    if (reachable[idx(nc, nr)]) continue;
+                    label[idx(nc, nr)] = lbl;
+                    bq.push(idx(nc, nr));
+                }
+            }
+        }
+
+    if (numClusters == 0) return {};
+
+    // Step 3: compute bounding box of each cluster
+    std::vector<PocketCluster> clusters(numClusters,
+                                        { 1e9, 1e9, -1e9, -1e9 });
+
+    for (int r = 0; r < mask.rows; ++r)
+        for (int c = 0; c < mask.cols; ++c) {
+            int lbl = label[idx(c, r)];
+            if (lbl < 0) continue;
+            double mmX = (c + 0.5) * MASK_RES;
+            double mmY = (r + 0.5) * MASK_RES;
+            clusters[lbl].minX = std::min(clusters[lbl].minX, mmX);
+            clusters[lbl].minY = std::min(clusters[lbl].minY, mmY);
+            clusters[lbl].maxX = std::max(clusters[lbl].maxX, mmX);
+            clusters[lbl].maxY = std::max(clusters[lbl].maxY, mmY);
+        }
+
+    // Filter tiny clusters (smaller than 4 cells — noise)
+    std::vector<PocketCluster> result;
+    for (auto &pc : clusters) {
+        double pw = pc.maxX - pc.minX;
+        double ph = pc.maxY - pc.minY;
+        if (pw * ph >= MASK_RES * MASK_RES * 4)
+            result.push_back(pc);
+    }
+    return result;
+}
+std::vector<QPointF> gatherAnchors(const Skyline              &sky,
+                                   const Mask                 &mask,
+                                   const std::vector<PocketCluster> &pockets,
+                                   int                         filledCells,
+                                   int                         totalCells)
+{
+    std::vector<QPointF> pts;
+
+    // 1. Pocket anchors — multiple sample points per pocket (TL + grid inside)
+    for (auto &pc : pockets) {
+        pts.emplace_back(pc.minX, pc.minY);   // top-left
+        pts.emplace_back(pc.minX, pc.maxY);   // bottom-left
+        pts.emplace_back(pc.maxX, pc.minY);   // top-right
+        // grid interior
+        double step = MASK_RES * 2;
+        for (double y = pc.minY; y <= pc.maxY; y += step)
+            for (double x = pc.minX; x <= pc.maxX; x += step)
+                pts.emplace_back(x, y);
+    }
+
+    // 2. Skyline TL corners
+    for (auto &seg : sky)
+        pts.emplace_back(seg.x, seg.y);
+
+    // 3. Free-space grid sampling
+    double fillRatio = double(filledCells) / std::max(1, totalCells);
+    int    stride    = std::max(1, int(8.0 - fillRatio * 6.0));
+
+    int marginCells = int(MARGIN_MM / MASK_RES);
+    for (int r = marginCells; r < mask.rows; r += stride)
+        for (int c = marginCells; c < mask.cols; c += stride)
+            if (!mask.get(c, r))
+                pts.emplace_back((c + 0.5) * MASK_RES, (r + 0.5) * MASK_RES);
+
+    return pts;
+}
+
+} // anonymous namespace
+
+
+// ── MainWindow::packShapes() ──────────────────────────────────────────────
 void MainWindow::packShapes()
 {
     if (objects.empty()) return;
 
-    const double MARGIN = 8.0;   // mm from page edge
-    const double GAP    = 5.0;   // mm between shapes
-    const double PAGE_W = 210.0;
-    const double PAGE_H = 297.0;
-
-    // Available packing area
-    const double areaX = MARGIN;
-    const double areaY = MARGIN;
-    const double areaW = PAGE_W - MARGIN * 2;
-    const double areaH = PAGE_H - MARGIN * 2;
-
-    // A free rectangle on the page
-    struct FreeRect {
-        double x, y, w, h;
-    };
-
-    // Start with one big free rectangle = entire usable page
-    std::vector<FreeRect> freeRects = {{ areaX, areaY, areaW, areaH }};
-
-    // Sort shapes: largest area first (better packing)
+    // ── 1. Sort by descending area ─────────────────────────────────────────
     std::vector<int> order(objects.size());
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [&](int a, int b) {
-        return (objects[a].widthMM * objects[a].heightMM) >
-               (objects[b].widthMM * objects[b].heightMM);
+        return objects[a].areaMM2 > objects[b].areaMM2;
     });
 
-    // Placed positions: index -> (newCX, newCY)
-    std::vector<std::pair<int, QPointF>> placements;
+    // ── 2. Initialise mask + skyline ──────────────────────────────────────
+    Mask    mask(PAGE_W_MM, PAGE_H_MM);
+    Skyline sky = makeSkyline();
+    int filledCells = 0;
+    int totalCells  = mask.cols * mask.rows;
 
-    // Track placed bounding boxes to split free rects
-    struct PlacedRect { double x, y, w, h; };
-    std::vector<PlacedRect> placed;
-
-    for (int idx : order) {
-        const ShapeObject &obj = objects[idx];
-        double sw = obj.widthMM  + GAP;
-        double sh = obj.heightMM + GAP;
-
-        // Find best free rect using BSSF (Best Short Side Fit)
-        int    bestFree  = -1;
-        double bestScore = 1e18;
-
-        for (int i = 0; i < (int)freeRects.size(); ++i) {
-            const FreeRect &fr = freeRects[i];
-            if (fr.w >= sw && fr.h >= sh) {
-                // Short side fit score: minimize the smaller leftover dimension
-                double score = std::min(fr.w - sw, fr.h - sh);
-                if (score < bestScore) {
-                    bestScore = score;
-                    bestFree  = i;
-                }
-            }
-        }
-
-        if (bestFree < 0) {
-            // No space found — place below everything as fallback
-            double maxY = areaY;
-            for (auto &p : placed) maxY = std::max(maxY, p.y + p.h);
-            placements.push_back({ idx, QPointF(areaX + obj.widthMM * 0.5,
-                                               maxY + obj.heightMM * 0.5) });
-            placed.push_back({ areaX, maxY, obj.widthMM + GAP, obj.heightMM + GAP });
-            continue;
-        }
-
-        FreeRect &fr = freeRects[bestFree];
-        double px = fr.x;  // top-left of placed shape (with gap baked in later)
-        double py = fr.y;
-
-        // Record placement (center position)
-        placements.push_back({ idx, QPointF(px + obj.widthMM * 0.5,
-                                           py + obj.heightMM * 0.5) });
-        PlacedRect pr = { px, py, obj.widthMM + GAP, obj.heightMM + GAP };
-        placed.push_back(pr);
-
-        // Split all free rects that overlap with this placed rect
-        std::vector<FreeRect> newFreeRects;
-        for (auto &r : freeRects) {
-            // Does placed rect intersect this free rect?
-            if (pr.x >= r.x + r.w || pr.x + pr.w <= r.x ||
-                pr.y >= r.y + r.h || pr.y + pr.h <= r.y) {
-                newFreeRects.push_back(r);  // no overlap, keep as-is
-                continue;
-            }
-            // Split into up to 4 sub-rectangles around the placed shape
-            // Left slice
-            if (pr.x > r.x)
-                newFreeRects.push_back({ r.x, r.y, pr.x - r.x, r.h });
-            // Right slice
-            if (pr.x + pr.w < r.x + r.w)
-                newFreeRects.push_back({ pr.x + pr.w, r.y,
-                                        r.x + r.w - (pr.x + pr.w), r.h });
-            // Top slice
-            if (pr.y > r.y)
-                newFreeRects.push_back({ r.x, r.y, r.w, pr.y - r.y });
-            // Bottom slice
-            if (pr.y + pr.h < r.y + r.h)
-                newFreeRects.push_back({ r.x, pr.y + pr.h,
-                                        r.w, r.y + r.h - (pr.y + pr.h) });
-        }
-
-        // Remove free rects that are fully contained inside another (deduplicate)
-        std::vector<FreeRect> pruned;
-        for (int i = 0; i < (int)newFreeRects.size(); ++i) {
-            bool contained = false;
-            for (int j = 0; j < (int)newFreeRects.size(); ++j) {
-                if (i == j) continue;
-                const FreeRect &a = newFreeRects[i];
-                const FreeRect &b = newFreeRects[j];
-                if (b.x <= a.x && b.y <= a.y &&
-                    b.x + b.w >= a.x + a.w &&
-                    b.y + b.h >= a.y + a.h) {
-                    contained = true;
-                    break;
-                }
-            }
-            if (!contained) pruned.push_back(newFreeRects[i]);
-        }
-        freeRects = pruned;
+    // ── 3. Save undo states ───────────────────────────────────────────────
+    std::vector<PackShapesCommand::ObjState> states(objects.size());
+    for (int i = 0; i < (int)objects.size(); ++i) {
+        states[i].index   = i;
+        states[i].oldCX   = objects[i].centerXmm;
+        states[i].oldCY   = objects[i].centerYmm;
+        states[i].oldPath = objects[i].pathCanvas;
+        states[i].newCX   = objects[i].centerXmm;
+        states[i].newCY   = objects[i].centerYmm;
+        states[i].newPath = objects[i].pathCanvas;
     }
 
-    // Now apply all placements as one undoable command
-    std::vector<PackShapesCommand::ObjState> states;
-    for (auto &[idx, newCenter] : placements) {
-        ShapeObject &obj = objects[idx];
+    std::vector<QPainterPath> placedMM(objects.size());
+    std::vector<bool> wasPlaced(objects.size(), false);
 
-        PackShapesCommand::ObjState state;
-        state.index   = idx;
-        state.oldCX   = obj.centerXmm;
-        state.oldCY   = obj.centerYmm;
-        state.oldPath = obj.pathCanvas;
+    const std::vector<double> ROTS = {0.0, 90.0, 180.0, 270.0};
 
-        double dxMM = newCenter.x() - obj.centerXmm;
-        double dyMM = newCenter.y() - obj.centerYmm;
+    // ── 4. Main placement loop ─────────────────────────────────────────────
+    for (int idx : order)
+    {
+        ShapeObject &obj   = objects[idx];
+        QPainterPath srcMM = pathToMM(obj.pathCanvas, pxPerMM);
 
-        obj.centerXmm = newCenter.x();
-        obj.centerYmm = newCenter.y();
-        QTransform trans;
-        trans.translate(dxMM * pxPerMM, dyMM * pxPerMM);
-        obj.pathCanvas = trans.map(state.oldPath);
+        struct Best {
+            double       score = std::numeric_limits<double>::max();
+            double       rot   = 0.0;
+            QPainterPath pathMM;
+        } best;
 
-        state.newCX   = obj.centerXmm;
-        state.newCY   = obj.centerYmm;
-        state.newPath = obj.pathCanvas;
-        states.push_back(state);
+        // ── v4: detect pockets BEFORE gathering anchors ─────────────────
+        std::vector<PocketCluster> pockets = findConcavePockets(mask);
+
+        std::vector<QPointF> anchors =
+            gatherAnchors(sky, mask, pockets, filledCells, totalCells);
+
+        for (double rotDeg : ROTS)
+        {
+            QPainterPath normPath = rotatePath(srcMM, rotDeg, 0.0, 0.0);
+            QRectF normBB = normPath.boundingRect();
+            double rW = normBB.width()  + GAP_MM;
+            double rH = normBB.height() + GAP_MM;
+
+            if (rW > AREA_W || rH > AREA_H) continue;
+
+            for (const QPointF &anchor : anchors)
+            {
+                double placeX = anchor.x();
+                double placeY = anchor.y();
+
+                if (placeX < MARGIN_MM || placeY < MARGIN_MM)          continue;
+                if (placeX + rW > MARGIN_MM + AREA_W)                  continue;
+                if (placeY + rH > MARGIN_MM + AREA_H)                  continue;
+
+                QPainterPath candidate = rotatePath(srcMM, rotDeg, placeX, placeY);
+
+                if (mask.collides(candidate, GAP_MM * 0.5))             continue;
+
+                // ── v4: pocket bonus ─────────────────────────────────────
+                // If this candidate lies mostly inside a detected pocket,
+                // give it a large bonus so it is strongly preferred.
+                int pocketBonus = 0;
+                QRectF cbb = candidate.boundingRect();
+                for (auto &pc : pockets) {
+                    // Check overlap between candidate BB and pocket BB
+                    double ox = std::min(cbb.right(),  pc.maxX)
+                                - std::max(cbb.left(),   pc.minX);
+                    double oy = std::min(cbb.bottom(), pc.maxY)
+                                - std::max(cbb.top(),    pc.minY);
+                    if (ox > 0 && oy > 0) {
+                        double overlapArea = ox * oy;
+                        double candArea    = cbb.width() * cbb.height();
+                        // If candidate fits ≥50% inside this pocket, big bonus
+                        if (candArea > 0 && overlapArea / candArea >= 0.5)
+                            pocketBonus += 100000;
+                    }
+                }
+
+                int    contact = mask.contactScore(candidate);
+                double score   = -(contact * 10000.0 + pocketBonus)
+                               + placeY * 100.0
+                               + placeX *   1.0;
+
+                if (score < best.score)
+                    best = { score, rotDeg, candidate };
+            }
+        }
+
+        // Fallback: stack below current skyline
+        if (best.score == std::numeric_limits<double>::max()) {
+            double maxY = MARGIN_MM;
+            for (auto &seg : sky) maxY = std::max(maxY, seg.y);
+            best.pathMM = rotatePath(srcMM, 0.0, MARGIN_MM, maxY);
+            best.rot    = 0.0;
+        }
+
+        // Stamp and update skyline
+        mask.stamp(best.pathMM, GAP_MM * 0.5);
+        filledCells += int(best.pathMM.boundingRect().width()  / MASK_RES)
+                       * int(best.pathMM.boundingRect().height() / MASK_RES);
+
+        QRectF pbb = best.pathMM.boundingRect();
+        updateSkyline(sky, pbb.left(), pbb.top(), pbb.width() + GAP_MM, pbb.height());
+
+        placedMM[idx]  = best.pathMM;
+        wasPlaced[idx] = true;
+
+        QRectF br = best.pathMM.boundingRect();
+        obj.centerXmm = br.center().x();
+        obj.centerYmm = br.center().y();
+        if (std::abs(best.rot - 90.0) < 1.0 || std::abs(best.rot - 270.0) < 1.0)
+            std::swap(obj.widthMM, obj.heightMM);
+        obj.pathCanvas = pathToPx(best.pathMM, pxPerMM);
+    }
+
+    // ── 5. Compaction: slide each shape toward top-left ───────────────────
+    for (int pass = 0; pass < 4; ++pass)
+    {
+        for (int idx : order)
+        {
+            if (!wasPlaced[idx]) continue;
+
+            QPainterPath &cur = placedMM[idx];
+            mask.unstamp(cur, GAP_MM * 0.5);
+
+            bool anyMoved = true;
+            while (anyMoved)
+            {
+                anyMoved = false;
+                const double D = MASK_RES;
+                const std::array<QPointF, 4> dirs = {
+                    QPointF(-D,  0),
+                    QPointF( 0, -D),
+                    QPointF(-D, -D),
+                    QPointF( D,  0)
+                };
+                for (auto &delta : dirs)
+                {
+                    QTransform t;
+                    t.translate(delta.x(), delta.y());
+                    QPainterPath moved = t.map(cur);
+
+                    QRectF mbb = moved.boundingRect();
+                    if (mbb.left()   < MARGIN_MM)               continue;
+                    if (mbb.top()    < MARGIN_MM)               continue;
+                    if (mbb.right()  > PAGE_W_MM - MARGIN_MM)   continue;
+                    if (mbb.bottom() > PAGE_H_MM - MARGIN_MM)   continue;
+                    if (mask.collides(moved, GAP_MM * 0.5))      continue;
+
+                    if (delta.x() + delta.y() < 0.0) {
+                        cur      = moved;
+                        anyMoved = true;
+                        break;
+                    }
+                }
+            }
+
+            mask.stamp(cur, GAP_MM * 0.5);
+
+            QRectF br = cur.boundingRect();
+            objects[idx].centerXmm  = br.center().x();
+            objects[idx].centerYmm  = br.center().y();
+            objects[idx].pathCanvas = pathToPx(cur, pxPerMM);
+        }
+    }
+
+    // ── 6. Write new states + push undo ───────────────────────────────────
+    for (int i = 0; i < (int)objects.size(); ++i) {
+        states[i].newCX   = objects[i].centerXmm;
+        states[i].newCY   = objects[i].centerYmm;
+        states[i].newPath = objects[i].pathCanvas;
     }
 
     undoStack.push(new PackShapesCommand(&objects, states));
+
     canvas->setObjects(objects, pxPerMM, calibrated);
     canvas->fitToView();
     populateSidebar();
     showObjectDetails(canvas->getSelectedIndex());
     markDirty();
 }
+
+
 int MainWindow::getNextId() const
 {
     int maxId = 0;
