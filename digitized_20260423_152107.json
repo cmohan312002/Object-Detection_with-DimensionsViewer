@@ -1,0 +1,356 @@
+{
+    "calib_rms_px": 0,
+    "calibrated": true,
+    "canvas": {
+        "height_mm": 297,
+        "width_mm": 210
+    },
+    "objects": [
+        {
+            "center_on_sheet": {
+                "x_mm": 138.35,
+                "y_mm": 173.11
+            },
+            "dimensions": {
+                "angle_deg": 89.4,
+                "area_mm2": 468.9,
+                "aspect_ratio": 4.807,
+                "diagonal_mm": 49.02,
+                "height_mm": 9.98,
+                "perimeter_mm": 117.3,
+                "width_mm": 47.99
+            },
+            "id": 1,
+            "path": [
+                {
+                    "cmd": "M",
+                    "x": 162.3,
+                    "y": 168.4
+                },
+                {
+                    "cmd": "L",
+                    "x": 162.1,
+                    "y": 167.9
+                },
+                {
+                    "cmd": "L",
+                    "x": 114.5,
+                    "y": 168.4
+                },
+                {
+                    "cmd": "L",
+                    "x": 114.4,
+                    "y": 178.1
+                },
+                {
+                    "cmd": "L",
+                    "x": 162.1,
+                    "y": 177.8
+                },
+                {
+                    "cmd": "L",
+                    "x": 162.3,
+                    "y": 168.4
+                },
+                {
+                    "cmd": "Z"
+                }
+            ],
+            "shape": "Pentagon"
+        },
+        {
+            "center_on_sheet": {
+                "x_mm": 148.57,
+                "y_mm": 119.54
+            },
+            "dimensions": {
+                "angle_deg": 89.1,
+                "area_mm2": 146.5,
+                "aspect_ratio": 1.313,
+                "diagonal_mm": 17.71,
+                "height_mm": 10.73,
+                "perimeter_mm": 50.1,
+                "width_mm": 14.09
+            },
+            "id": 2,
+            "path": [
+                {
+                    "cmd": "M",
+                    "x": 141.6,
+                    "y": 114.5
+                },
+                {
+                    "cmd": "L",
+                    "x": 141.8,
+                    "y": 125
+                },
+                {
+                    "cmd": "L",
+                    "x": 155.5,
+                    "y": 124.6
+                },
+                {
+                    "cmd": "L",
+                    "x": 155.4,
+                    "y": 114.2
+                },
+                {
+                    "cmd": "L",
+                    "x": 141.6,
+                    "y": 114.5
+                },
+                {
+                    "cmd": "Z"
+                }
+            ],
+            "shape": "Rectangle"
+        },
+        {
+            "center_on_sheet": {
+                "x_mm": 105.43,
+                "y_mm": 117.85
+            },
+            "dimensions": {
+                "angle_deg": 88.8,
+                "area_mm2": 100.3,
+                "aspect_ratio": 1.024,
+                "diagonal_mm": 14.47,
+                "height_mm": 10.11,
+                "perimeter_mm": 40.9,
+                "width_mm": 10.35
+            },
+            "id": 3,
+            "path": [
+                {
+                    "cmd": "M",
+                    "x": 110.3,
+                    "y": 112.7
+                },
+                {
+                    "cmd": "L",
+                    "x": 100.4,
+                    "y": 113
+                },
+                {
+                    "cmd": "L",
+                    "x": 100.5,
+                    "y": 123
+                },
+                {
+                    "cmd": "L",
+                    "x": 110.5,
+                    "y": 122.7
+                },
+                {
+                    "cmd": "L",
+                    "x": 110.3,
+                    "y": 112.7
+                },
+                {
+                    "cmd": "Z"
+                }
+            ],
+            "shape": "Square"
+        },
+        {
+            "center_on_sheet": {
+                "x_mm": 117.05,
+                "y_mm": 97.15
+            },
+            "dimensions": {
+                "angle_deg": 90,
+                "area_mm2": 293.1,
+                "aspect_ratio": 1.882,
+                "diagonal_mm": 27.06,
+                "height_mm": 12.7,
+                "perimeter_mm": 73.7,
+                "width_mm": 23.9
+            },
+            "id": 4,
+            "path": [
+                {
+                    "cmd": "M",
+                    "x": 123.2,
+                    "y": 85.3
+                },
+                {
+                    "cmd": "L",
+                    "x": 110.8,
+                    "y": 85.7
+                },
+                {
+                    "cmd": "L",
+                    "x": 111.1,
+                    "y": 109.1
+                },
+                {
+                    "cmd": "L",
+                    "x": 123.4,
+                    "y": 108.6
+                },
+                {
+                    "cmd": "L",
+                    "x": 123.2,
+                    "y": 85.3
+                },
+                {
+                    "cmd": "Z"
+                }
+            ],
+            "shape": "Rectangle"
+        },
+        {
+            "center_on_sheet": {
+                "x_mm": 136.6,
+                "y_mm": 74
+            },
+            "dimensions": {
+                "angle_deg": 89.7,
+                "area_mm2": 405.9,
+                "aspect_ratio": 2.031,
+                "diagonal_mm": 32.47,
+                "height_mm": 14.35,
+                "perimeter_mm": 87.8,
+                "width_mm": 29.13
+            },
+            "id": 5,
+            "path": [
+                {
+                    "cmd": "M",
+                    "x": 143.5,
+                    "y": 59.4
+                },
+                {
+                    "cmd": "L",
+                    "x": 129.5,
+                    "y": 59.8
+                },
+                {
+                    "cmd": "L",
+                    "x": 129.8,
+                    "y": 88.6
+                },
+                {
+                    "cmd": "L",
+                    "x": 143.8,
+                    "y": 88.2
+                },
+                {
+                    "cmd": "L",
+                    "x": 143.5,
+                    "y": 59.4
+                },
+                {
+                    "cmd": "Z"
+                }
+            ],
+            "shape": "Rectangle"
+        },
+        {
+            "center_on_sheet": {
+                "x_mm": 91.59,
+                "y_mm": 101.9
+            },
+            "dimensions": {
+                "angle_deg": 88.5,
+                "area_mm2": 4751.5,
+                "aspect_ratio": 1.482,
+                "diagonal_mm": 151.56,
+                "height_mm": 84.79,
+                "perimeter_mm": 625.1,
+                "width_mm": 125.63
+            },
+            "id": 6,
+            "path": [
+                {
+                    "cmd": "M",
+                    "x": 131.8,
+                    "y": 38.1
+                },
+                {
+                    "cmd": "L",
+                    "x": 51.4,
+                    "y": 44.8
+                },
+                {
+                    "cmd": "L",
+                    "x": 51.1,
+                    "y": 165.6
+                },
+                {
+                    "cmd": "L",
+                    "x": 135.3,
+                    "y": 158.1
+                },
+                {
+                    "cmd": "L",
+                    "x": 135.2,
+                    "y": 146.2
+                },
+                {
+                    "cmd": "L",
+                    "x": 134.4,
+                    "y": 141.3
+                },
+                {
+                    "cmd": "L",
+                    "x": 69.7,
+                    "y": 143.7
+                },
+                {
+                    "cmd": "L",
+                    "x": 68.8,
+                    "y": 109.2
+                },
+                {
+                    "cmd": "L",
+                    "x": 103.3,
+                    "y": 108.4
+                },
+                {
+                    "cmd": "L",
+                    "x": 103.6,
+                    "y": 106.8
+                },
+                {
+                    "cmd": "L",
+                    "x": 102.6,
+                    "y": 96.9
+                },
+                {
+                    "cmd": "L",
+                    "x": 68.4,
+                    "y": 98.2
+                },
+                {
+                    "cmd": "L",
+                    "x": 67.7,
+                    "y": 91.4
+                },
+                {
+                    "cmd": "L",
+                    "x": 67.5,
+                    "y": 59.1
+                },
+                {
+                    "cmd": "L",
+                    "x": 132.4,
+                    "y": 54.6
+                },
+                {
+                    "cmd": "L",
+                    "x": 131.8,
+                    "y": 38.1
+                },
+                {
+                    "cmd": "Z"
+                }
+            ],
+            "shape": "Polygon(15)"
+        }
+    ],
+    "pixelsPerMM": 10,
+    "timestamp": "2026-04-23T15:21:51",
+    "unit": "mm",
+    "version": "3.0"
+}
